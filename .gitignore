@@ -1,0 +1,10 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# Python virtual environment
+venv/
+.env/
+
+# IDE settings
+.idea/
