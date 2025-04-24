@@ -34,18 +34,18 @@ Install using  ```requirements.txt```
 
 ## Setup
 
-1. **Install required packages:**
+1. **Make venv:**
+
+    ```bash
+    python3 -m venv venv
+    source venv/bin/activate
+    ```
+
+2. **Install required packages:**
 
     ```bash
     pip install -r requirements.txt
     ```
-
-2. **Configure your database connection:**
-
-- Set up your database (SQLite, PostgreSQL, etc.).
-- Define your connection in .streamlit/secrets.toml as:
-- [connections.todo_db]
-```url = "sqlite:///todo.db"  # Or your actual database URL```
 
 3. **Run the Streamlit app:**
    ```bash
