@@ -1,14 +1,9 @@
 # Database Todo App 📝
 
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://todo-list-app-kunal.streamlit.app/)
-[![Project Status: Active](https://www.repostatus.org/badges/latest/active.svg)](https://www.repostatus.org/#active)
-![uptime](https://img.shields.io/badge/uptime-100%25-brightgreen)
-[![Made With Love](https://img.shields.io/badge/Made%20With-Love-orange.svg)](https://github.com/kunal9960)
-
 This project creates a multi-user **Todo Dashboard** using **Python, Streamlit, and SQLAlchemy**, with all data stored and retrieved from a **SQL database**. Users can manage their daily tasks through an intuitive UI with persistent backend support.
 
-<img src="https://github.com/kunal9960/streamlit_todo_list_app/blob/master/Main%20Page.jpg?raw=true" width="800">
-<img src="https://github.com/kunal9960/streamlit_todo_list_app/blob/master/Database.png?raw=true" width="800">
+<img src="https://github.com/kochyanlv/zvello/blob/master/Main%20Page.jpg?raw=true" width="800">
+<img src="https://github.com/kochyanlv/zvello/blob/master/Database.png?raw=true" width="800">
 
 ---
 
@@ -36,19 +31,20 @@ Install using  ```requirements.txt```
 
 1. **Make venv:**
 
-    ```bash
+    ```commandline
     python3 -m venv venv
     source venv/bin/activate
     ```
 
 2. **Install required packages:**
 
-    ```bash
+    ```commandline
     pip install -r requirements.txt
     ```
 
 3. **Run the Streamlit app:**
-   ```bash
+
+   ```commandline
    streamlit run main.py
    ```
 
