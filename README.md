@@ -2,8 +2,8 @@
 
 This project creates a multi-user **Todo Dashboard** using **Python, Streamlit, and SQLAlchemy**, with all data stored and retrieved from a **SQL database**. Users can manage their daily tasks through an intuitive UI with persistent backend support.
 
-<img src="https://github.com/KochyanLV/zvello/blob/master/Main%20Page.jpg?raw=true" width="800">
-<img src="https://github.com/KochyanLV/zvello/blob/master/Database.png?raw=true" width="800">
+<img src="https://github.com/KochyanLV/zvello/blob/main/Main%20Page.jpg?raw=true" width="800">
+<img src="https://github.com/KochyanLV/zvello/blob/main/Database.png?raw=true" width="800">
 
 ---
 
