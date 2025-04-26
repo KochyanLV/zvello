@@ -8,3 +8,7 @@ venv/
 
 # IDE settings
 .idea/
+
+
+*.ipynb
+*.ipynb_checkpoints
