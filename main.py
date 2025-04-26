@@ -7,6 +7,16 @@ from sqlalchemy import Boolean, Column, Date, Integer, MetaData, String, Table
 from streamlit.connections import SQLConnection
 import pandas as pd
 
+# --- MongoDB setup ---
+from pymongo.mongo_client import MongoClient
+import certifi
+
+uri = "mongodb+srv://kochyanlv:qwerty12345@cluster71234.ifyaey3.mongodb.net/?retryWrites=true&w=majority&appName=Cluster71234"
+mongo_client = MongoClient(uri, tlsCAFile=certifi.where())
+mongo_db = mongo_client["todo_db"]
+documents_collection = mongo_db["documents"]
+
+
 st.set_page_config(
     page_title="Todo List App",
     page_icon="🎯",
@@ -110,6 +120,7 @@ def create_todo_callback(connection: SQLConnection, table: Table):
     if not st.session_state.new_todo_form__title:
         st.toast("Title empty, not adding todo")
         return
+    
     new_todo_data = {
         "user_id": st.session_state.user_id,
         "title": st.session_state.new_todo_form__title,
@@ -120,9 +131,26 @@ def create_todo_callback(connection: SQLConnection, table: Table):
     }
     stmt = table.insert().values(**new_todo_data)
     with connection.session as session:
-        session.execute(stmt)
+        result = session.execute(stmt)
         session.commit()
+        # Получаем id только что созданной задачи
+        new_task_id = result.inserted_primary_key[0]
+        
+        # Если был загружен файл
+        if st.session_state.get("new_todo_form__file_upload"):
+            uploaded_file = st.session_state["new_todo_form__file_upload"]
+            file_data = uploaded_file.read()
+            document_record = {
+                "task_id": new_task_id,
+                "user_id": st.session_state.user_id,
+                "filename": uploaded_file.name,
+                "filetype": uploaded_file.type,
+                "filecontent": file_data,
+            }
+            documents_collection.insert_one(document_record)
+    
     st.session_state[SESSION_STATE_KEY_TODOS] = load_all_todos(conn, todo_table)
+
 
 def open_update_callback(todo_id: int):
     st.session_state[f"currently_editing__{todo_id}"] = True
@@ -264,6 +292,7 @@ with st.form("new_todo_form", clear_on_submit=True):
     st.subheader(":material/add_circle: New todo")
     st.text_input("Title", key="new_todo_form__title", placeholder="Add your task")
     st.text_area("Description", key="new_todo_form__description", placeholder="Add more details...")
+    st.file_uploader("Attach a file (optional)", key="new_todo_form__file_upload")
     date_col, submit_col = st.columns((1, 2), vertical_alignment="bottom")
     date_col.date_input("Due date", key="new_todo_form__due_date")
     submit_col.form_submit_button(
@@ -273,6 +302,7 @@ with st.form("new_todo_form", clear_on_submit=True):
         type="primary",
         use_container_width=True,
     )
+
 
 st.markdown(
     "[![GitHub Badge](https://img.shields.io/badge/GitHub-181717?logo=github&logoColor=fff&style=flat)](https://github.com/kunal9960/streamlit_todo_list_app)&nbsp;&nbsp;" +
