@@ -120,7 +120,6 @@ def create_todo_callback(connection: SQLConnection, table: Table):
     if not st.session_state.new_todo_form__title:
         st.toast("Title empty, not adding todo")
         return
-    
     new_todo_data = {
         "user_id": st.session_state.user_id,
         "title": st.session_state.new_todo_form__title,
@@ -133,22 +132,19 @@ def create_todo_callback(connection: SQLConnection, table: Table):
     with connection.session as session:
         result = session.execute(stmt)
         session.commit()
-        # Получаем id только что созданной задачи
-        new_task_id = result.inserted_primary_key[0]
-        
-        # Если был загружен файл
-        if st.session_state.get("new_todo_form__file_upload"):
-            uploaded_file = st.session_state["new_todo_form__file_upload"]
-            file_data = uploaded_file.read()
-            document_record = {
-                "task_id": new_task_id,
-                "user_id": st.session_state.user_id,
-                "filename": uploaded_file.name,
-                "filetype": uploaded_file.type,
-                "filecontent": file_data,
-            }
-            documents_collection.insert_one(document_record)
-    
+        # Получить id только что созданной задачи
+        todo_id = result.inserted_primary_key[0]
+
+    # Если был загружен файл, сохраним его в MongoDB
+    uploaded_file = st.session_state.get("new_todo_form__file")
+    if uploaded_file:
+        documents_collection.insert_one({
+            "task_id": todo_id,
+            "user_id": st.session_state.user_id,
+            "filename": uploaded_file.name,
+            "filedata": uploaded_file.read()
+        })
+
     st.session_state[SESSION_STATE_KEY_TODOS] = load_all_todos(conn, todo_table)
 
 
@@ -202,9 +198,19 @@ def todo_card(connection: SQLConnection, table: Table, todo_item: Todo):
             display_title = f"{strikethrough}{display_title}{strikethrough}"
             display_description = f"{strikethrough}{display_description}{strikethrough}"
             display_due_date = f"{strikethrough}{display_due_date}{strikethrough}"
+
         st.subheader(display_title)
         st.markdown(display_description)
         st.markdown(display_due_date)
+        document = documents_collection.find_one({"task_id": todo_id, "user_id": st.session_state.user_id})
+        if document:
+            st.download_button(
+                label=f"Download: {document['filename']}",
+                data=document['filedata'],
+                file_name=document['filename'],
+                mime="application/octet-stream",
+                use_container_width=True
+            )
         done_col, edit_col, delete_col = st.columns(3)
         done_col.button(
             "Done" if not todo_item.done else "Redo",
@@ -292,9 +298,9 @@ with st.form("new_todo_form", clear_on_submit=True):
     st.subheader(":material/add_circle: New todo")
     st.text_input("Title", key="new_todo_form__title", placeholder="Add your task")
     st.text_area("Description", key="new_todo_form__description", placeholder="Add more details...")
-    st.file_uploader("Attach a file (optional)", key="new_todo_form__file_upload")
     date_col, submit_col = st.columns((1, 2), vertical_alignment="bottom")
     date_col.date_input("Due date", key="new_todo_form__due_date")
+    uploaded_file = st.file_uploader("Attach a file (optional)", key="new_todo_form__file")
     submit_col.form_submit_button(
         "Add todo",
         on_click=create_todo_callback,
@@ -302,6 +308,7 @@ with st.form("new_todo_form", clear_on_submit=True):
         type="primary",
         use_container_width=True,
     )
+
 
 
 st.markdown(
