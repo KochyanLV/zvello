@@ -1,11 +1,12 @@
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Dict, Optional
 import sqlalchemy as sa
 import streamlit as st
 from sqlalchemy import Boolean, Column, Date, Integer, MetaData, String, Table
 from streamlit.connections import SQLConnection
 import pandas as pd
+import uuid
 
 # --- MongoDB setup ---
 from pymongo.mongo_client import MongoClient
@@ -36,42 +37,31 @@ with col1:
 with col2:
     st.image("todo dog.gif")
 # --- Connect to DB and Table ---
-TABLE_NAME = "todo"
-conn = st.connection("todo_db", ttl=5 * 60)
+TABLE_NAME = "dashboard"
+conn = st.connection("tasks_db", ttl=5 * 60)
 
-@st.cache_resource
-def connect_table():
-    metadata_obj = MetaData()
-    todo_table = Table(
-        TABLE_NAME,
-        metadata_obj,
-        Column("id", Integer, primary_key=True),
-        Column("user_id", String, nullable=True),
-        Column("title", String(30)),
-        Column("description", String, nullable=True),
-        Column("created_at", Date),
-        Column("due_at", Date, nullable=True),
-        Column("done", Boolean, nullable=True),
-    )
-    return metadata_obj, todo_table
-
-metadata_obj, todo_table = connect_table()
+from models import dashboard as dashboard_table
+from models import metadata_obj as dashboard_metadata
 
 # ✅ Optional: View full database table
 st.divider()
-with st.expander("📅 Data stored in Todo table", expanded=False):
+with st.expander("📅 Data stored in Dashboard table", expanded=False):
     with conn.session as session:
-        stmt = sa.select(todo_table)
+        stmt = sa.select(dashboard_table)
         result = session.execute(stmt)
         df = result.mappings().all()
         if df:
             df = pd.DataFrame(df)
-            # Reorder columns: user_id (name) first, created_at last
-            preferred_order = ['user_id', 'title', 'description', 'due_at', 'done', 'created_at']
+            # Преобразуем все значения Enum в строку для Arrow
+            if df['status'].apply(lambda x: hasattr(x, 'value')).any():
+                df['status'] = df['status'].apply(lambda x: x.value if hasattr(x, 'value') else x)
+            preferred_order = [
+                'assignee_name', 'task_id', 'title', 'description', 'status', 'soft_deadline', 'hard_deadline', 'created_at'
+            ]
             df = df[[col for col in preferred_order if col in df.columns]]
             st.dataframe(df, use_container_width=True)
         else:
-            st.info("The todo table is currently empty.")
+            st.info("The dashboard table is currently empty.")
 
 
 # --- Ask for user's name once per session ---
@@ -80,17 +70,30 @@ if "user_id" not in st.session_state or not st.session_state.user_id:
     if not st.session_state.user_id:
         st.stop()
 
-SESSION_STATE_KEY_TODOS = "todos_data"
+SESSION_STATE_KEY_TASKS = "dashboard_data"
+
+from enum import Enum
+
+class TaskStatus(Enum):
+    todo = "todo"
+    in_progress = "in_progress"
+    review = "review"
+    done = "done"
+    blocked = "blocked"
+    cancelled = "cancelled"
 
 @dataclass
-class Todo:
-    id: Optional[int] = None
-    user_id: Optional[str] = None
+class DashboardTask:
+    id: int = None
+    task_id: int = None
     title: str = ""
-    description: Optional[str] = None
-    created_at: Optional[date] = None
-    due_at: Optional[date] = None
-    done: bool = False
+    description: str = ""
+    assignee_id: int = None
+    assignee_name: str = ""
+    created_at: datetime = None
+    status: str = "todo"
+    soft_deadline: datetime = None
+    hard_deadline: datetime = None
 
     @classmethod
     def from_row(cls, row):
@@ -102,107 +105,111 @@ def check_table_exists(connection: SQLConnection, table_name: str) -> bool:
     inspector = sa.inspect(connection.engine)
     return inspector.has_table(table_name)
 
-def load_all_todos(connection: SQLConnection, table: Table) -> Dict[int, Todo]:
-    stmt = sa.select(table).where(table.c.user_id == st.session_state.user_id).order_by(table.c.id)
+def load_all_tasks(connection: SQLConnection, table: Table) -> Dict[int, DashboardTask]:
+    stmt = sa.select(table).where(table.c.assignee_name == st.session_state.user_id).order_by(table.c.id)
     with connection.session as session:
         result = session.execute(stmt)
-        todos = [Todo.from_row(row) for row in result.all()]
-        return {todo.id: todo for todo in todos if todo and todo.title}
+        tasks = [DashboardTask.from_row(row) for row in result.all()]
+        return {task.id: task for task in tasks if task and task.title}
 
-def load_todo(connection: SQLConnection, table: Table, todo_id: int) -> Optional[Todo]:
-    stmt = sa.select(table).where(table.c.id == todo_id)
+def load_task(connection: SQLConnection, table: Table, task_id: int) -> Optional[DashboardTask]:
+    stmt = sa.select(table).where(table.c.id == task_id)
     with connection.session as session:
         result = session.execute(stmt)
         row = result.first()
-        return Todo.from_row(row)
+        return DashboardTask.from_row(row)
 
-def create_todo_callback(connection: SQLConnection, table: Table):
-    if not st.session_state.new_todo_form__title:
-        st.toast("Title empty, not adding todo")
+def create_task_callback(connection: SQLConnection, table: Table):
+    if not st.session_state.new_task_form__title:
+        st.toast("Title empty, not adding task")
         return
-    new_todo_data = {
-        "user_id": st.session_state.user_id,
-        "title": st.session_state.new_todo_form__title,
-        "description": st.session_state.new_todo_form__description,
-        "created_at": date.today(),
-        "due_at": st.session_state.new_todo_form__due_date,
-        "done": False,
+    unique_task_id = uuid.uuid4().int & 0x7FFFFFFF
+    status_value = st.session_state.new_task_form__status
+    new_task_data = {
+        "task_id": unique_task_id,
+        "title": st.session_state.new_task_form__title,
+        "description": st.session_state.new_task_form__description,
+        "assignee_id": None,
+        "assignee_name": st.session_state.user_id,
+        "created_at": datetime.now(),
+        "status": status_value,
+        "soft_deadline": st.session_state.new_task_form__soft_deadline,
+        "hard_deadline": st.session_state.new_task_form__hard_deadline,
     }
-    stmt = table.insert().values(**new_todo_data)
+    stmt = table.insert().values(**new_task_data)
     with connection.session as session:
         result = session.execute(stmt)
         session.commit()
-        # Получить id только что созданной задачи
-        todo_id = result.inserted_primary_key[0]
+        task_id = result.inserted_primary_key[0]
 
-    # Если был загружен файл, сохраним его в MongoDB
-    uploaded_file = st.session_state.get("new_todo_form__file")
+    uploaded_file = st.session_state.get("new_task_form__file")
     if uploaded_file:
         documents_collection.insert_one({
-            "task_id": todo_id,
+            "task_id": task_id,
             "user_id": st.session_state.user_id,
             "filename": uploaded_file.name,
             "filedata": uploaded_file.read()
         })
 
-    st.session_state[SESSION_STATE_KEY_TODOS] = load_all_todos(conn, todo_table)
+    st.session_state[SESSION_STATE_KEY_TASKS] = load_all_tasks(conn, dashboard_table)
 
+def open_update_callback(task_id: int):
+    st.session_state[f"currently_editing__{task_id}"] = True
 
-def open_update_callback(todo_id: int):
-    st.session_state[f"currently_editing__{todo_id}"] = True
+def cancel_update_callback(task_id: int):
+    st.session_state[f"currently_editing__{task_id}"] = False
 
-def cancel_update_callback(todo_id: int):
-    st.session_state[f"currently_editing__{todo_id}"] = False
-
-def update_todo_callback(connection: SQLConnection, table: Table, todo_id: int):
+def update_task_callback(connection: SQLConnection, table: Table, task_id: int):
+    status_value = st.session_state[f"edit_task_form_{task_id}__status"]
     updated_values = {
-        "title": st.session_state[f"edit_todo_form_{todo_id}__title"],
-        "description": st.session_state[f"edit_todo_form_{todo_id}__description"],
-        "due_at": st.session_state[f"edit_todo_form_{todo_id}__due_date"],
+        "title": st.session_state[f"edit_task_form_{task_id}__title"],
+        "description": st.session_state[f"edit_task_form_{task_id}__description"],
+        "soft_deadline": st.session_state[f"edit_task_form_{task_id}__soft_deadline"],
+        "hard_deadline": st.session_state[f"edit_task_form_{task_id}__hard_deadline"],
+        "status": status_value,
     }
     if not updated_values["title"]:
         st.toast("Title cannot be empty.", icon="⚠️")
-        st.session_state[f"currently_editing__{todo_id}"] = True
+        st.session_state[f"currently_editing__{task_id}"] = True
         return
-    stmt = table.update().where(table.c.id == todo_id).values(**updated_values)
+    stmt = table.update().where(table.c.id == task_id).values(**updated_values)
     with connection.session as session:
         session.execute(stmt)
         session.commit()
-    st.session_state[SESSION_STATE_KEY_TODOS][todo_id] = load_todo(connection, table, todo_id)
-    st.session_state[f"currently_editing__{todo_id}"] = False
+    st.session_state[SESSION_STATE_KEY_TASKS][task_id] = load_task(connection, table, task_id)
+    st.session_state[f"currently_editing__{task_id}"] = False
 
-def delete_todo_callback(connection: SQLConnection, table: Table, todo_id: int):
-    stmt = table.delete().where(table.c.id == todo_id)
+def delete_task_callback(connection: SQLConnection, table: Table, task_id: int):
+    stmt = table.delete().where(table.c.id == task_id)
     with connection.session as session:
         session.execute(stmt)
         session.commit()
-    st.session_state[SESSION_STATE_KEY_TODOS] = load_all_todos(conn, todo_table)
-    st.session_state[f"currently_editing__{todo_id}"] = False
+    st.session_state[SESSION_STATE_KEY_TASKS] = load_all_tasks(conn, dashboard_table)
+    st.session_state[f"currently_editing__{task_id}"] = False
 
-def mark_done_callback(connection: SQLConnection, table: Table, todo_id: int):
-    current_done_status = st.session_state[SESSION_STATE_KEY_TODOS][todo_id].done
-    stmt = table.update().where(table.c.id == todo_id).values(done=not current_done_status)
-    with connection.session as session:
-        session.execute(stmt)
-        session.commit()
-    st.session_state[SESSION_STATE_KEY_TODOS][todo_id] = load_todo(connection, table, todo_id)
-
-def todo_card(connection: SQLConnection, table: Table, todo_item: Todo):
-    todo_id = todo_item.id
+def task_card(connection: SQLConnection, table: Table, task_item: DashboardTask):
+    task_id = task_item.id
     with st.container(border=True):
-        display_title = todo_item.title
-        display_description = todo_item.description or ":grey[*No description*]"
-        display_due_date = f":grey[Due {todo_item.due_at.strftime('%Y-%m-%d')}]"
-        if todo_item.done:
-            strikethrough = "~~"
-            display_title = f"{strikethrough}{display_title}{strikethrough}"
-            display_description = f"{strikethrough}{display_description}{strikethrough}"
-            display_due_date = f"{strikethrough}{display_due_date}{strikethrough}"
-
+        display_title = task_item.title
+        display_description = task_item.description or ":grey[*No description*]"
+        status_value = task_item.status
+        if isinstance(status_value, TaskStatus):
+            status_value = status_value.value
+        else:
+            status_value = str(status_value)
+            if status_value.startswith('TaskStatus.'):
+                status_value = status_value.split('.', 1)[1]
+        display_status = f":grey[Status: {status_value}]"
+        display_soft_deadline = f":grey[Soft deadline: {task_item.soft_deadline.strftime('%Y-%m-%d') if task_item.soft_deadline else '-'}]"
+        display_hard_deadline = f":grey[Hard deadline: {task_item.hard_deadline.strftime('%Y-%m-%d') if task_item.hard_deadline else '-'}]"
+        display_task_id = f":grey[task_id: {task_item.task_id}]"
         st.subheader(display_title)
         st.markdown(display_description)
-        st.markdown(display_due_date)
-        document = documents_collection.find_one({"task_id": todo_id, "user_id": st.session_state.user_id})
+        st.markdown(display_task_id)
+        st.markdown(display_status)
+        st.markdown(display_soft_deadline)
+        st.markdown(display_hard_deadline)
+        document = documents_collection.find_one({"task_id": task_id, "user_id": st.session_state.user_id})
         if document:
             st.download_button(
                 label=f"Download: {document['filename']}",
@@ -211,70 +218,69 @@ def todo_card(connection: SQLConnection, table: Table, todo_item: Todo):
                 mime="application/octet-stream",
                 use_container_width=True
             )
-        done_col, edit_col, delete_col = st.columns(3)
-        done_col.button(
-            "Done" if not todo_item.done else "Redo",
-            icon=":material/check_circle:",
-            key=f"display_todo_{todo_id}__done",
-            on_click=mark_done_callback,
-            args=(conn, todo_table, todo_id),
-            type="secondary" if todo_item.done else "primary",
-            use_container_width=True,
-        )
+        edit_col, delete_col = st.columns(2)
         edit_col.button(
             "Edit",
             icon=":material/edit:",
-            key=f"display_todo_{todo_id}__edit",
+            key=f"display_task_{task_id}__edit",
             on_click=open_update_callback,
-            args=(todo_id,),
-            disabled=todo_item.done,
+            args=(task_id,),
             use_container_width=True,
         )
         if delete_col.button(
             "Delete",
             icon=":material/delete:",
-            key=f"display_todo_{todo_id}__delete",
+            key=f"display_task_{task_id}__delete",
             use_container_width=True,
         ):
-            delete_todo_callback(connection, table, todo_id)
+            delete_task_callback(connection, table, task_id)
             st.rerun(scope="app")
 
-def todo_edit_widget(connection: SQLConnection, table: Table, todo_item: Todo):
-    todo_id = todo_item.id
-    with st.form(f"edit_todo_form_{todo_id}"):
-        st.text_input("Title", value=todo_item.title, key=f"edit_todo_form_{todo_id}__title")
-        st.text_area("Description", value=todo_item.description, key=f"edit_todo_form_{todo_id}__description")
-        st.date_input("Due date", value=todo_item.due_at, key=f"edit_todo_form_{todo_id}__due_date")
+def task_edit_widget(connection: SQLConnection, table: Table, task_item: DashboardTask):
+    task_id = task_item.id
+    with st.form(f"edit_task_form_{task_id}"):
+        st.text_input("Title", value=task_item.title, key=f"edit_task_form_{task_id}__title")
+        st.text_area("Description", value=task_item.description, key=f"edit_task_form_{task_id}__description")
+        status_values = [s.value for s in TaskStatus]
+        if isinstance(task_item.status, TaskStatus):
+            current_status = task_item.status.value
+        else:
+            current_status = str(task_item.status)
+            if current_status.startswith('TaskStatus.'):
+                current_status = current_status.split('.', 1)[1]
+        st.selectbox("Status", status_values, index=status_values.index(current_status), key=f"edit_task_form_{task_id}__status")
+        st.date_input("Soft deadline", value=task_item.soft_deadline, key=f"edit_task_form_{task_id}__soft_deadline")
+        st.date_input("Hard deadline", value=task_item.hard_deadline, key=f"edit_task_form_{task_id}__hard_deadline")
         submit_col, cancel_col = st.columns(2)
         submit_col.form_submit_button(
             "Save",
             icon=":material/save:",
             type="primary",
-            on_click=update_todo_callback,
-            args=(connection, table, todo_id),
+            on_click=update_task_callback,
+            args=(connection, table, task_id),
             use_container_width=True,
         )
         cancel_col.form_submit_button(
             "Cancel",
             on_click=cancel_update_callback,
-            args=(todo_id,),
+            args=(task_id,),
             use_container_width=True,
         )
 
 @st.fragment
-def todo_component(connection: SQLConnection, table: Table, todo_id: int):
-    todo_item = st.session_state[SESSION_STATE_KEY_TODOS][todo_id]
-    currently_editing = st.session_state.get(f"currently_editing__{todo_id}", False)
+def task_component(connection: SQLConnection, table: Table, task_id: int):
+    task_item = st.session_state[SESSION_STATE_KEY_TASKS][task_id]
+    currently_editing = st.session_state.get(f"currently_editing__{task_id}", False)
     if not currently_editing:
-        todo_card(connection, table, todo_item)
+        task_card(connection, table, task_item)
     else:
-        todo_edit_widget(connection, table, todo_item)
+        task_edit_widget(connection, table, task_item)
 
 # --- Sidebar: Admin Options ---
 with st.sidebar:
     st.header("Admin")
     if st.button("Create table", type="secondary"):
-        st.toast("Todo table created successfully!", icon="✅")
+        st.toast("Dashboard table created successfully!", icon="✅")
     st.divider()
     st.subheader("Session State Debug")
     st.json(st.session_state)
@@ -284,27 +290,29 @@ if not check_table_exists(conn, TABLE_NAME):
     st.warning("Create table from admin sidebar", icon="⚠")
     st.stop()
 
-if SESSION_STATE_KEY_TODOS not in st.session_state:
-    with st.spinner("Loading Todos..."):
-        st.session_state[SESSION_STATE_KEY_TODOS] = load_all_todos(conn, todo_table)
+if SESSION_STATE_KEY_TASKS not in st.session_state:
+    with st.spinner("Loading Tasks..."):
+        st.session_state[SESSION_STATE_KEY_TASKS] = load_all_tasks(conn, dashboard_table)
 
-current_todos: Dict[int, Todo] = st.session_state.get(SESSION_STATE_KEY_TODOS, {})
-for todo_id in current_todos.keys():
-    if f"currently_editing__{todo_id}" not in st.session_state:
-        st.session_state[f"currently_editing__{todo_id}"] = False
-    todo_component(conn, todo_table, todo_id)
+current_tasks: Dict[int, DashboardTask] = st.session_state.get(SESSION_STATE_KEY_TASKS, {})
+for task_id in current_tasks.keys():
+    if f"currently_editing__{task_id}" not in st.session_state:
+        st.session_state[f"currently_editing__{task_id}"] = False
+    task_component(conn, dashboard_table, task_id)
 
-with st.form("new_todo_form", clear_on_submit=True):
-    st.subheader(":material/add_circle: New todo")
-    st.text_input("Title", key="new_todo_form__title", placeholder="Add your task")
-    st.text_area("Description", key="new_todo_form__description", placeholder="Add more details...")
-    date_col, submit_col = st.columns((1, 2), vertical_alignment="bottom")
-    date_col.date_input("Due date", key="new_todo_form__due_date")
-    uploaded_file = st.file_uploader("Attach a file (optional)", key="new_todo_form__file")
+with st.form("new_task_form", clear_on_submit=True):
+    st.subheader(":material/add_circle: New task")
+    st.text_input("Title", key="new_task_form__title", placeholder="Add your task")
+    st.text_area("Description", key="new_task_form__description", placeholder="Add more details...")
+    st.selectbox("Status", [s.value for s in TaskStatus], key="new_task_form__status")
+    date_col1, date_col2, submit_col = st.columns((1, 1, 2), vertical_alignment="bottom")
+    date_col1.date_input("Soft deadline", key="new_task_form__soft_deadline")
+    date_col2.date_input("Hard deadline", key="new_task_form__hard_deadline")
+    uploaded_file = st.file_uploader("Attach a file (optional)", key="new_task_form__file")
     submit_col.form_submit_button(
-        "Add todo",
-        on_click=create_todo_callback,
-        args=(conn, todo_table),
+        "Add task",
+        on_click=create_task_callback,
+        args=(conn, dashboard_table),
         type="primary",
         use_container_width=True,
     )
