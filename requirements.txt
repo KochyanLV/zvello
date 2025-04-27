@@ -2,3 +2,6 @@ streamlit
 sqlalchemy
 pymysql
 psycopg2-binary
+pymongo
+pandas
+certifi
