@@ -74,6 +74,7 @@ class Dashboard(Base):
     status = Column(Enum(TaskStatus), nullable=False)
     soft_deadline = Column(DateTime)
     hard_deadline = Column(DateTime)
+    parent_task_id = Column(Integer, nullable=True)
     
     # Relationships
     task = relationship('Task', back_populates='dashboard')
@@ -183,7 +184,8 @@ class TaskHistory(Base):
 # Database connection and table creation
 def init_db(database_url='sqlite:///tasks.db'):
     engine = create_engine(database_url)
-    Base.metadata.create_all(engine)
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
     return engine
 
 if __name__ == '__main__':
