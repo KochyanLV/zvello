@@ -18,6 +18,90 @@ from streamlit.connections import SQLConnection
 import pandas as pd
 import uuid
 import streamlit_cookies_manager as cookies
+from neo4j import GraphDatabase
+
+
+NEO4J_URI = "bolt://3.239.42.182:7687"
+NEO4J_USER = "neo4j"
+NEO4J_PASS = "apportionments-hairs-deviation"
+neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASS))
+
+
+def create_task_node(task_id, title):
+    """Создает узел в Neo4j для задачи"""
+    with neo4j_driver.session() as session:
+        session.run(
+            "MERGE (t:Task {task_id: $task_id}) "
+            "SET t.title = $title",
+            task_id=task_id, title=title
+        )
+
+
+def create_task_relationship(child_id, parent_id):
+    """Создает отношение PARENT_OF между задачами"""
+    with neo4j_driver.session() as session:
+        session.run(
+            "MATCH (parent:Task {task_id: $parent_id}) "
+            "MATCH (child:Task {task_id: $child_id}) "
+            "MERGE (parent)-[:PARENT_OF]->(child)",
+            parent_id=parent_id, child_id=child_id
+        )
+
+
+def remove_task_relationships(task_id):
+    """Удаляет только те связи, где task_id является дочерним элементом"""
+    with neo4j_driver.session() as session:
+        session.run(
+            "MATCH (parent:Task)-[r:PARENT_OF]->(child:Task {task_id: $task_id}) DELETE r",
+            task_id=task_id
+        )
+
+
+def delete_task_node(task_id):
+    """Удаляет узел задачи из Neo4j"""
+    with neo4j_driver.session() as session:
+        session.run(
+            "MATCH (t:Task {task_id: $task_id}) DETACH DELETE t",
+            task_id=task_id
+        )
+
+
+def get_parent_task(task_id):
+    """Получает родительскую задачу"""
+    with neo4j_driver.session() as session:
+        result = session.run(
+            "MATCH (parent:Task)-[:PARENT_OF]->(child:Task {task_id: $task_id}) "
+            "RETURN parent.task_id AS parent_id, parent.title AS parent_title",
+            task_id=task_id
+        )
+        record = result.single()
+        if record:
+            return {"id": record["parent_id"], "title": record["parent_title"]}
+        return None
+
+
+def get_child_tasks(task_id):
+    """Получает все дочерние задачи"""
+    with neo4j_driver.session() as session:
+        result = session.run(
+            "MATCH (parent:Task {task_id: $task_id})-[:PARENT_OF]->(child:Task) "
+            "RETURN child.task_id AS child_id, child.title AS child_title",
+            task_id=task_id
+        )
+        return [{"id": record["child_id"], "title": record["child_title"]} for record in result]
+
+
+def check_circular_dependency(parent_id, child_id):
+    """Проверяет, не возникнет ли циклическая зависимость"""
+    with neo4j_driver.session() as session:
+        result = session.run(
+            "MATCH path = shortestPath((child:Task {task_id: $child_id})-[:PARENT_OF*]->(parent:Task {task_id: $parent_id})) "
+            "RETURN count(path) > 0 AS has_circular",
+            parent_id=parent_id, child_id=child_id
+        )
+        record = result.single()
+        return record and record["has_circular"]
+    
 
 # --- Authentication Functions ---
 def hash_password(password, salt=None):
@@ -339,7 +423,7 @@ def create_task_callback(connection: SQLConnection, table: Table):
     # Handle parent task ID
     parent_task_id = st.session_state.new_task_form__parent_task_id
     if parent_task_id == "None":
-        parent_task_id = unique_task_id
+        parent_task_id = None
     else:
         try:
             parent_task_id = int(parent_task_id)
@@ -362,13 +446,19 @@ def create_task_callback(connection: SQLConnection, table: Table):
         "created_at": datetime.now(),
         "status": status_value,
         "soft_deadline": st.session_state.new_task_form__soft_deadline,
-        "hard_deadline": st.session_state.new_task_form__hard_deadline,
-        "parent_task_id": parent_task_id,
+        "hard_deadline": st.session_state.new_task_form__hard_deadline
     }
     stmt = table.insert().values(**new_task_data)
     with connection.session as session:
         session.execute(stmt)
         session.commit()
+
+    # Создание узла в Neo4j
+    create_task_node(unique_task_id, new_task_data["title"])
+    
+    # Если есть родитель, создаем отношение в Neo4j
+    if parent_task_id:
+        create_task_relationship(unique_task_id, parent_task_id)
 
     uploaded_file = st.session_state.get("new_task_form__file")
     if uploaded_file:
@@ -401,7 +491,6 @@ def update_task_callback(connection: SQLConnection, table: Table, task_id: int):
     else:
         try:
             parent_task_id = int(parent_task_id)
-            
                 
             # Verify parent task exists
             parent_task = load_all_tasks(connection, table)[parent_task_id]
@@ -419,7 +508,6 @@ def update_task_callback(connection: SQLConnection, table: Table, task_id: int):
         "soft_deadline": st.session_state[f"edit_task_form_{task_id}__soft_deadline"],
         "hard_deadline": st.session_state[f"edit_task_form_{task_id}__hard_deadline"],
         "status": status_value,
-        "parent_task_id": parent_task_id,
         "assignee_id": st.session_state.user['id'],  # Use authenticated user's ID
         "assignee_name": st.session_state.user['username'],  # Use authenticated user's username
     }
@@ -438,6 +526,12 @@ def update_task_callback(connection: SQLConnection, table: Table, task_id: int):
     with connection.session as session:
         session.execute(stmt)
         session.commit()
+
+    create_task_node(task_id, updated_values["title"])
+    remove_task_relationships(task_id)
+    if parent_task_id:
+        create_task_relationship(task_id, parent_task_id)
+
     st.session_state[SESSION_STATE_KEY_TASKS][task_id] = load_all_tasks(connection, table)[task_id]
     st.session_state[f"currently_editing__{task_id}"] = False
 
@@ -450,12 +544,13 @@ def delete_task_callback(connection: SQLConnection, table: Table, task_id: int):
         
     # Check if this task has children
     with connection.session as session:
-        stmt = sa.select(sa.func.count()).select_from(table).where((table.c.parent_task_id == task_id) & (table.c.task_id != table.c.parent_task_id))
-        child_count = session.execute(stmt).scalar()
-        
+        child_count = len(get_child_tasks(task_id))
+
         if child_count > 0:
             st.toast(f"Cannot delete task with {child_count} child tasks. Please delete or reassign child tasks first.", icon="⚠️")
             return
+
+        delete_task_node(task_id)
     
     # Delete any associated documents
     documents_collection.delete_many({"task_id": task_id, "user_id": st.session_state.user['username']})
@@ -488,24 +583,20 @@ def task_card(connection: SQLConnection, table: Table, task_item: DashboardTask)
         display_task_id = f":grey[Task ID: {task_id}]"
         
         # Display parent task info if exists
-        parent_task_info = ""
-        if task_item.parent_task_id:
-            parent_task = load_all_tasks(connection, table)[task_item.parent_task_id] if task_item.parent_task_id != task_id else None
-            if parent_task:
-                parent_task_info = f":blue[↑ Parent task: {parent_task.title} (ID: {parent_task.task_id})]"
-            else:
-                parent_task_info = f":grey[No parent task]"
+        parent = get_parent_task(task_id)
+        if parent:
+            parent_task_info = f":blue[↑ Parent task: {parent['title']} (ID: {parent['id']})]"
+        else:
+            parent_task_info = f":grey[No parent task]"
         
         # Find child tasks
         child_tasks_info = ""
-        stmt = sa.select(table).where((table.c.parent_task_id == task_id) & (table.c.task_id != table.c.parent_task_id))
-        with connection.session as session:
-            result = session.execute(stmt)
-            child_tasks = result.all()
-            if child_tasks:
-                child_tasks_list = []
-                for child in child_tasks:
-                    child_tasks_list.append(f"{child.title} (ID: {child.task_id})")
+        child_tasks = get_child_tasks(task_id)
+        if child_tasks:
+            child_tasks_list = []
+            for child in child_tasks:
+                child_tasks_list.append(f"{child['title']} (ID: {child['id']})")
+            if child_tasks_list:
                 child_tasks_info = ":green[↓ Subtasks: " + ", ".join(child_tasks_list) + "]"
         
         st.subheader(display_title)
