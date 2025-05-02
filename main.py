@@ -160,6 +160,7 @@ def create_task_callback(connection: SQLConnection, table: Table):
             
             # Verify parent task exists
             parent_task = load_task(connection, table, parent_task_id)
+            parent_task_id = parent_task.task_id
             if not parent_task:
                 st.toast(f"Parent task with ID {parent_task_id} not found. Task created without parent.", icon="⚠️")
                 parent_task_id = unique_task_id
@@ -255,6 +256,7 @@ def update_task_callback(connection: SQLConnection, table: Table, task_id: int):
             if not parent_task:
                 st.toast(f"Parent task with ID {parent_task_id} not found. Task updated without parent.", icon="⚠️")
                 parent_task_id = None
+            parent_task_id = parent_task.task_id
                 
         except ValueError:
             parent_task_id = None
@@ -287,7 +289,7 @@ def delete_task_callback(connection: SQLConnection, table: Table, task_id: int):
     st.session_state[f"currently_editing__{task_id}"] = False
 
 def task_card(connection: SQLConnection, table: Table, task_item: DashboardTask):
-    task_id = task_item.id
+    task_id = task_item.task_id
     with st.container(border=True):
         display_title = task_item.title
         display_description = task_item.description or ":grey[*No description*]"
