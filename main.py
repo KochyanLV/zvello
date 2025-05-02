@@ -367,14 +367,13 @@ def create_task_callback(connection: SQLConnection, table: Table):
     }
     stmt = table.insert().values(**new_task_data)
     with connection.session as session:
-        result = session.execute(stmt)
+        session.execute(stmt)
         session.commit()
-        task_id = result.inserted_primary_key[0]
 
     uploaded_file = st.session_state.get("new_task_form__file")
     if uploaded_file:
         documents_collection.insert_one({
-            "task_id": task_id,
+            "task_id": unique_task_id,
             "user_id": st.session_state.user['username'],  # Use username for MongoDB
             "filename": uploaded_file.name,
             "filedata": uploaded_file.read()
