@@ -491,7 +491,7 @@ def task_card(connection: SQLConnection, table: Table, task_item: DashboardTask)
         # Display parent task info if exists
         parent_task_info = ""
         if task_item.parent_task_id:
-            parent_task = load_all_tasks(connection, table)[task_item.parent_task_id]
+            parent_task = load_all_tasks(connection, table)[task_item.parent_task_id] if task_item.parent_task_id != task_id else None
             if parent_task:
                 parent_task_info = f":blue[↑ Parent task: {parent_task.title} (ID: {parent_task.task_id})]"
             else:
@@ -499,7 +499,7 @@ def task_card(connection: SQLConnection, table: Table, task_item: DashboardTask)
         
         # Find child tasks
         child_tasks_info = ""
-        stmt = sa.select(table).where(table.c.parent_task_id == task_id)
+        stmt = sa.select(table).where((table.c.parent_task_id == task_id) & (table.c.task_id != table.c.parent_task_id))
         with connection.session as session:
             result = session.execute(stmt)
             child_tasks = result.all()
