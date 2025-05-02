@@ -56,7 +56,8 @@ with st.expander("📅 Data stored in Dashboard table", expanded=False):
             if df['status'].apply(lambda x: hasattr(x, 'value')).any():
                 df['status'] = df['status'].apply(lambda x: x.value if hasattr(x, 'value') else x)
             preferred_order = [
-                'assignee_name', 'task_id', 'title', 'description', 'status', 'soft_deadline', 'hard_deadline', 'created_at'
+                'assignee_name', 'task_id', 'title', 'description', 'status', 
+                'soft_deadline', 'hard_deadline', 'parent_task_id', 'created_at'
             ]
             df = df[[col for col in preferred_order if col in df.columns]]
             st.dataframe(df, use_container_width=True)
@@ -94,6 +95,7 @@ class DashboardTask:
     status: str = "todo"
     soft_deadline: datetime = None
     hard_deadline: datetime = None
+    parent_task_id: int = None
 
     @classmethod
     def from_row(cls, row):
@@ -104,6 +106,28 @@ class DashboardTask:
 def check_table_exists(connection: SQLConnection, table_name: str) -> bool:
     inspector = sa.inspect(connection.engine)
     return inspector.has_table(table_name)
+
+def get_available_tasks(connection: SQLConnection, table: Table, current_user_id: str = None) -> Dict[int, str]:
+    """Get all available tasks that can be selected as parent tasks"""
+    # We'll filter by the current user if specified
+    if current_user_id:
+        stmt = sa.select(table).where(table.c.assignee_name == current_user_id)
+    else:
+        stmt = sa.select(table)
+        
+    with connection.session as session:
+        result = session.execute(stmt)
+        tasks = {}
+        for row in result:
+            if row.id and row.title:
+                # Format status for display
+                status = row.status
+                if hasattr(status, 'value'):
+                    status = status.value
+                
+                # Include more details for better identification
+                tasks[row.id] = f"[{row.task_id}] {row.title} ({status})"
+        return tasks
 
 def load_all_tasks(connection: SQLConnection, table: Table) -> Dict[int, DashboardTask]:
     stmt = sa.select(table).where(table.c.assignee_name == st.session_state.user_id).order_by(table.c.id)
@@ -125,6 +149,23 @@ def create_task_callback(connection: SQLConnection, table: Table):
         return
     unique_task_id = uuid.uuid4().int & 0x7FFFFFFF
     status_value = st.session_state.new_task_form__status
+    
+    # Handle parent task ID
+    parent_task_id = st.session_state.new_task_form__parent_task_id
+    if parent_task_id == "None":
+        parent_task_id = unique_task_id
+    else:
+        try:
+            parent_task_id = int(parent_task_id)
+            
+            # Verify parent task exists
+            parent_task = load_task(connection, table, parent_task_id)
+            if not parent_task:
+                st.toast(f"Parent task with ID {parent_task_id} not found. Task created without parent.", icon="⚠️")
+                parent_task_id = unique_task_id
+        except ValueError:
+            parent_task_id = unique_task_id
+            
     new_task_data = {
         "task_id": unique_task_id,
         "title": st.session_state.new_task_form__title,
@@ -135,6 +176,7 @@ def create_task_callback(connection: SQLConnection, table: Table):
         "status": status_value,
         "soft_deadline": st.session_state.new_task_form__soft_deadline,
         "hard_deadline": st.session_state.new_task_form__hard_deadline,
+        "parent_task_id": parent_task_id,
     }
     stmt = table.insert().values(**new_task_data)
     with connection.session as session:
@@ -161,12 +203,69 @@ def cancel_update_callback(task_id: int):
 
 def update_task_callback(connection: SQLConnection, table: Table, task_id: int):
     status_value = st.session_state[f"edit_task_form_{task_id}__status"]
+    
+    # Handle parent task ID
+    parent_task_id = st.session_state[f"edit_task_form_{task_id}__parent_task_id"]
+    if parent_task_id == "None":
+        parent_task_id = None
+    else:
+        try:
+            parent_task_id = int(parent_task_id)
+            
+            # Prevent circular dependencies and self-references
+            if parent_task_id == task_id:
+                st.toast("A task cannot be its own parent.", icon="⚠️")
+                st.session_state[f"currently_editing__{task_id}"] = True
+                return
+                
+            # Check for deeper circular dependencies
+            def check_for_circular_dependency(check_parent_id, original_task_id, visited=None):
+                if visited is None:
+                    visited = set()
+                
+                if check_parent_id in visited:
+                    return True  # Circular dependency found
+                
+                if check_parent_id is None:
+                    return False  # No parent, so no circular dependency
+                
+                visited.add(check_parent_id)
+                
+                # Get the parent's parent
+                with connection.session as session:
+                    stmt = sa.select(table.c.parent_task_id).where(table.c.id == check_parent_id)
+                    result = session.execute(stmt).first()
+                    
+                    if result and result[0]:
+                        grand_parent_id = result[0]
+                        # Check if this would create a circular reference
+                        if grand_parent_id == original_task_id:
+                            return True
+                        return check_for_circular_dependency(grand_parent_id, original_task_id, visited)
+                    
+                return False
+            
+            if check_for_circular_dependency(parent_task_id, task_id):
+                st.toast("This would create a circular dependency between tasks.", icon="⚠️")
+                st.session_state[f"currently_editing__{task_id}"] = True
+                return
+                
+            # Verify parent task exists
+            parent_task = load_task(connection, table, parent_task_id)
+            if not parent_task:
+                st.toast(f"Parent task with ID {parent_task_id} not found. Task updated without parent.", icon="⚠️")
+                parent_task_id = None
+                
+        except ValueError:
+            parent_task_id = None
+    
     updated_values = {
         "title": st.session_state[f"edit_task_form_{task_id}__title"],
         "description": st.session_state[f"edit_task_form_{task_id}__description"],
         "soft_deadline": st.session_state[f"edit_task_form_{task_id}__soft_deadline"],
         "hard_deadline": st.session_state[f"edit_task_form_{task_id}__hard_deadline"],
         "status": status_value,
+        "parent_task_id": parent_task_id,
     }
     if not updated_values["title"]:
         st.toast("Title cannot be empty.", icon="⚠️")
@@ -202,13 +301,43 @@ def task_card(connection: SQLConnection, table: Table, task_item: DashboardTask)
         display_status = f":grey[Status: {status_value}]"
         display_soft_deadline = f":grey[Soft deadline: {task_item.soft_deadline.strftime('%Y-%m-%d') if task_item.soft_deadline else '-'}]"
         display_hard_deadline = f":grey[Hard deadline: {task_item.hard_deadline.strftime('%Y-%m-%d') if task_item.hard_deadline else '-'}]"
-        display_task_id = f":grey[task_id: {task_item.task_id}]"
+        display_task_id = f":grey[Task ID: {task_id}]"
+        
+        # Display parent task info if exists
+        parent_task_info = ""
+        if task_item.parent_task_id:
+            parent_task = load_task(connection, table, task_item.parent_task_id)
+            if parent_task:
+                parent_task_info = f":blue[↑ Parent task: {parent_task.title} (ID: {parent_task.task_id})]"
+            else:
+                parent_task_info = f":grey[No parent task]"
+        
+        # Find child tasks
+        child_tasks_info = ""
+        stmt = sa.select(table).where(table.c.parent_task_id == task_id)
+        with connection.session as session:
+            result = session.execute(stmt)
+            child_tasks = result.all()
+            if child_tasks:
+                child_tasks_list = []
+                for child in child_tasks:
+                    child_tasks_list.append(f"{child.title} (ID: {child.task_id})")
+                child_tasks_info = ":green[↓ Subtasks: " + ", ".join(child_tasks_list) + "]"
+        
         st.subheader(display_title)
         st.markdown(display_description)
-        st.markdown(display_task_id)
-        st.markdown(display_status)
-        st.markdown(display_soft_deadline)
-        st.markdown(display_hard_deadline)
+        task_col1, task_col2 = st.columns(2)
+        task_col1.markdown(display_task_id)
+        task_col1.markdown(display_status)
+        task_col2.markdown(display_soft_deadline)
+        task_col2.markdown(display_hard_deadline)
+        
+        # Display parent/child relationships
+        if parent_task_info:
+            st.markdown(parent_task_info)
+        if child_tasks_info:
+            st.markdown(child_tasks_info)
+            
         document = documents_collection.find_one({"task_id": task_id, "user_id": st.session_state.user_id})
         if document:
             st.download_button(
@@ -237,7 +366,7 @@ def task_card(connection: SQLConnection, table: Table, task_item: DashboardTask)
             st.rerun(scope="app")
 
 def task_edit_widget(connection: SQLConnection, table: Table, task_item: DashboardTask):
-    task_id = task_item.id
+    task_id = task_item.task_id
     with st.form(f"edit_task_form_{task_id}"):
         st.text_input("Title", value=task_item.title, key=f"edit_task_form_{task_id}__title")
         st.text_area("Description", value=task_item.description, key=f"edit_task_form_{task_id}__description")
@@ -249,6 +378,27 @@ def task_edit_widget(connection: SQLConnection, table: Table, task_item: Dashboa
             if current_status.startswith('TaskStatus.'):
                 current_status = current_status.split('.', 1)[1]
         st.selectbox("Status", status_values, index=status_values.index(current_status), key=f"edit_task_form_{task_id}__status")
+        
+        # Get available parent tasks (excluding this task)
+        available_tasks = get_available_tasks(connection, table, st.session_state.user_id)
+        if task_id in available_tasks:
+            del available_tasks[task_id]  # Can't select self as parent
+            
+        parent_task_options = {"None": "No parent task"}
+        parent_task_options.update(available_tasks)
+        
+        # Select the current parent task if any
+        current_parent = str(task_item.parent_task_id) if task_item.parent_task_id else "None"
+        
+        # Create a parent task dropdown
+        st.selectbox(
+            "Parent Task", 
+            options=list(parent_task_options.keys()),
+            format_func=lambda x: parent_task_options[x],
+            key=f"edit_task_form_{task_id}__parent_task_id",
+            index=list(parent_task_options.keys()).index(current_parent) if current_parent in parent_task_options else 0
+        )
+        
         st.date_input("Soft deadline", value=task_item.soft_deadline, key=f"edit_task_form_{task_id}__soft_deadline")
         st.date_input("Hard deadline", value=task_item.hard_deadline, key=f"edit_task_form_{task_id}__hard_deadline")
         submit_col, cancel_col = st.columns(2)
@@ -279,8 +429,34 @@ def task_component(connection: SQLConnection, table: Table, task_id: int):
 # --- Sidebar: Admin Options ---
 with st.sidebar:
     st.header("Admin")
-    if st.button("Create table", type="secondary"):
-        st.toast("Dashboard table created successfully!", icon="✅")
+    
+    # Create tables with form and submit button
+    with st.form(key="create_tables_form"):
+        st.write("Create or reset database tables")
+        submit_button = st.form_submit_button(
+            "Create/Reset Tables", 
+            type="secondary",
+            use_container_width=True
+        )
+        
+        if submit_button:
+            # Check if tables exist
+            inspector = sa.inspect(conn.engine)
+            tables_exist = inspector.has_table(TABLE_NAME)
+            
+            # Create tables (SQLAlchemy will handle "IF NOT EXISTS" logic)
+            with conn.session as session:
+                # Create metadata
+                if tables_exist:
+                    # Drop existing tables if they exist
+                    st.info("Dropping existing tables...")
+                    dashboard_metadata.drop_all(conn.engine)
+                
+                # Create tables
+                dashboard_metadata.create_all(conn.engine)
+                session.commit()
+                st.toast("Dashboard tables created/reset successfully!", icon="✅")
+    
     st.divider()
     st.subheader("Session State Debug")
     st.json(st.session_state)
@@ -305,6 +481,20 @@ with st.form("new_task_form", clear_on_submit=True):
     st.text_input("Title", key="new_task_form__title", placeholder="Add your task")
     st.text_area("Description", key="new_task_form__description", placeholder="Add more details...")
     st.selectbox("Status", [s.value for s in TaskStatus], key="new_task_form__status")
+    
+    # Get available parent tasks
+    available_tasks = get_available_tasks(conn, dashboard_table, st.session_state.user_id)
+    parent_task_options = {"None": "No parent task"}
+    parent_task_options.update(available_tasks)
+    
+    # Create a parent task dropdown
+    st.selectbox(
+        "Parent Task", 
+        options=list(parent_task_options.keys()),
+        format_func=lambda x: parent_task_options[x],
+        key="new_task_form__parent_task_id"
+    )
+    
     date_col1, date_col2, submit_col = st.columns((1, 1, 2), vertical_alignment="bottom")
     date_col1.date_input("Soft deadline", key="new_task_form__soft_deadline")
     date_col2.date_input("Hard deadline", key="new_task_form__hard_deadline")

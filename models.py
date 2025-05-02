@@ -56,6 +56,7 @@ dashboard = Table(
     Column('status', Enum(TaskStatus), nullable=False),
     Column('soft_deadline', DateTime),
     Column('hard_deadline', DateTime),
+    Column('parent_task_id', Integer, nullable=True),
 )
 
 # Task dependencies (parent-child relationships)
