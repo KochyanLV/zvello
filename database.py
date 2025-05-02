@@ -22,6 +22,8 @@ class User(Base):
     email = Column(String(120), unique=True, nullable=False)
     full_name = Column(String(100))
     created_at = Column(DateTime, default=datetime.utcnow)
+    password_hash = Column(String(256), nullable=False)
+    salt = Column(String(64), nullable=False)
 
     # Relationships
     created_tasks = relationship('Task', back_populates='creator', foreign_keys='Task.creator_id')

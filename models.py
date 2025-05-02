@@ -24,6 +24,8 @@ users = Table(
     Column('username', String(50), unique=True, nullable=False),
     Column('email', String(120), unique=True, nullable=False),
     Column('full_name', String(100)),
+    Column('password_hash', String(256), nullable=False),
+    Column('salt', String(64), nullable=False),
     Column('created_at', DateTime, default=datetime.utcnow),
 )
 
