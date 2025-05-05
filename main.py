@@ -742,8 +742,8 @@ def update_task_callback(connection: SQLConnection, table: Table, task_id: int):
         "soft_deadline": st.session_state[f"edit_task_form_{task_id}__soft_deadline"],
         "hard_deadline": st.session_state[f"edit_task_form_{task_id}__hard_deadline"],
         "status": status_value,
-        "assignee_id": st.session_state.user['id'],  # Use authenticated user's ID
-        "assignee_name": st.session_state.user['username'],  # Use authenticated user's username
+        # "assignee_id": st.session_state.user['id'],  # Use authenticated user's ID
+        # "assignee_name": st.session_state.user['username'],  # Use authenticated user's username
     }
     if not updated_values["title"]:
         st.toast("Title cannot be empty.", icon="⚠️")
