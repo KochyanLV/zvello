@@ -134,4 +134,15 @@ task_history = Table(
     Column('old_value', Text),
     Column('new_value', Text),
     Column('changed_at', DateTime, default=datetime.utcnow),
+)
+
+# Task permissions
+task_permissions = Table(
+    'task_permissions',
+    metadata_obj,
+    Column('id', Integer, primary_key=True),
+    Column('task_id', Integer, nullable=False),
+    Column('user_id', Integer, ForeignKey('users.id'), nullable=False),
+    Column('permission_level', String(20), nullable=False),  # 'owner', 'edit', 'read', 'none'
+    Column('created_at', DateTime, default=datetime.utcnow),
 ) 

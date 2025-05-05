@@ -19,11 +19,161 @@ import pandas as pd
 import uuid
 import streamlit_cookies_manager as cookies
 from neo4j import GraphDatabase
+from enum import Enum
 
 
-NEO4J_URI = "bolt://3.239.42.182:7687"
+# --- Permission Levels ---
+class PermissionLevel(Enum):
+    OWNER = "owner"     # Full rights (creator)
+    EDIT = "edit"       # Can edit but not delete
+    READ = "read"       # Read-only access
+    NONE = "none"       # No access (default)
+
+
+# --- Permission Management Functions ---
+def get_all_users(conn):
+    """Get all users in the system"""
+    with conn.session as session:
+        try:
+            stmt = sa.text("""
+                SELECT id, username, email, full_name
+                FROM users
+            """)
+            result = session.execute(stmt)
+            return [{"id": row[0], "username": row[1], "email": row[2], "full_name": row[3]} for row in result]
+        except Exception as e:
+            st.error(f"Error fetching users: {e}")
+            return []
+
+def get_user_permission(conn, task_id, user_id):
+    """Get a user's permission level for a specific task"""
+    with conn.session as session:
+        # First check if the user is the task owner
+        stmt = sa.text("""
+            SELECT assignee_id FROM dashboard 
+            WHERE task_id = :task_id
+        """)
+        result = session.execute(stmt, {"task_id": task_id})
+        owner_id = result.scalar()
+        
+        if owner_id == user_id:
+            return PermissionLevel.OWNER.value
+        
+        # Check explicit permissions
+        stmt = sa.text("""
+            SELECT permission_level FROM task_permissions 
+            WHERE task_id = :task_id AND user_id = :user_id
+        """)
+        result = session.execute(stmt, {"task_id": task_id, "user_id": user_id})
+        permission = result.scalar()
+        
+        return permission if permission else PermissionLevel.NONE.value
+
+
+def set_user_permission(conn, task_id, user_id, permission_level):
+    """Set a user's permission level for a specific task"""
+    if not isinstance(permission_level, str):
+        permission_level = permission_level.value
+        
+    # Handle the None permission by deleting the record
+    if permission_level == PermissionLevel.NONE.value:
+        with conn.session as session:
+            try:
+                # Delete any existing permission
+                stmt = sa.text("""
+                    DELETE FROM task_permissions 
+                    WHERE task_id = :task_id AND user_id = :user_id
+                """)
+                session.execute(stmt, {"task_id": task_id, "user_id": user_id})
+                session.commit()
+                return True
+            except Exception as e:
+                st.error(f"Error removing permission: {e}")
+                session.rollback()
+                return False
+    
+    # For other permission levels, update or insert
+    with conn.session as session:
+        try:
+            # Check if a permission record already exists
+            stmt = sa.text("""
+                SELECT id FROM task_permissions 
+                WHERE task_id = :task_id AND user_id = :user_id
+            """)
+            result = session.execute(stmt, {"task_id": task_id, "user_id": user_id})
+            record_id = result.scalar()
+            
+            if record_id:
+                # Update existing permission
+                stmt = sa.text("""
+                    UPDATE task_permissions 
+                    SET permission_level = :permission_level 
+                    WHERE id = :id
+                """)
+                session.execute(stmt, {"id": record_id, "permission_level": permission_level})
+                st.caption(f"Updated permission for user {user_id} on task {task_id} to {permission_level}")
+            else:
+                # Create new permission
+                stmt = sa.text("""
+                    INSERT INTO task_permissions 
+                    (task_id, user_id, permission_level, created_at) 
+                    VALUES (:task_id, :user_id, :permission_level, :created_at)
+                """)
+                session.execute(stmt, {
+                    "task_id": task_id, 
+                    "user_id": user_id, 
+                    "permission_level": permission_level,
+                    "created_at": datetime.now()
+                })
+                st.caption(f"Created new permission for user {user_id} on task {task_id}: {permission_level}")
+                
+            session.commit()
+            return True
+        except Exception as e:
+            st.error(f"Error setting permission: {e}")
+            session.rollback()
+            return False
+
+
+def get_all_task_permissions(conn, task_id):
+    """Get all user permissions for a specific task"""
+    with conn.session as session:
+        try:
+            stmt = sa.text("""
+                SELECT tp.user_id, u.username, tp.permission_level
+                FROM task_permissions tp
+                JOIN users u ON tp.user_id = u.id
+                WHERE tp.task_id = :task_id
+            """)
+            result = session.execute(stmt, {"task_id": task_id})
+            permissions = [{"user_id": row[0], "username": row[1], "permission": row[2]} for row in result]
+            return permissions
+        except Exception as e:
+            st.error(f"Error fetching task permissions: {e}")
+            return []
+
+
+def can_user_edit_task(conn, task_id, user_id):
+    """Check if a user can edit a task"""
+    permission = get_user_permission(conn, task_id, user_id)
+    return permission in [PermissionLevel.OWNER.value, PermissionLevel.EDIT.value]
+
+
+def can_user_view_task(conn, task_id, user_id):
+    """Check if a user can view a task"""
+    permission = get_user_permission(conn, task_id, user_id)
+    return permission in [PermissionLevel.OWNER.value, PermissionLevel.EDIT.value, PermissionLevel.READ.value]
+
+
+def can_user_delete_task(conn, task_id, user_id):
+    """Check if a user can delete a task"""
+    permission = get_user_permission(conn, task_id, user_id)
+    return permission == PermissionLevel.OWNER.value
+
+
+NEO4J_URI = "bolt://54.224.104.214:7687"
 NEO4J_USER = "neo4j"
-NEO4J_PASS = "apportionments-hairs-deviation"
+NEO4J_PASS = "arrow-monitor-firer"
 neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASS))
 
 
@@ -321,6 +471,7 @@ if not st.session_state.is_authenticated:
 # --- Display user info in the sidebar ---
 with st.sidebar:
     st.subheader(f"Welcome, {st.session_state.user['username']}!")
+   
     if st.button("Logout", key="sidebar_logout"):
         st.session_state.is_authenticated = False
         st.session_state.user = None
@@ -349,8 +500,6 @@ with st.expander("📅 Data stored in Dashboard table", expanded=False):
             st.info("The dashboard table is currently empty.")
 
 SESSION_STATE_KEY_TASKS = "dashboard_data"
-
-from enum import Enum
 
 class TaskStatus(Enum):
     todo = "todo"
@@ -407,11 +556,78 @@ def get_available_tasks(connection: SQLConnection, table: Table, current_user_id
         return tasks
 
 def load_all_tasks(connection: SQLConnection, table: Table) -> Dict[int, DashboardTask]:
-    stmt = sa.select(table).where(table.c.assignee_name == st.session_state.user['username']).order_by(table.c.id)
-    with connection.session as session:
-        result = session.execute(stmt)
-        tasks = [DashboardTask.from_row(row) for row in result.all()]
-        return {task.task_id: task for task in tasks if task and task.title}
+    user_id = st.session_state.user['id']
+    username = st.session_state.user['username']
+    
+    try:
+        # Get tasks where user is the assignee/owner
+        stmt = sa.select(table).where(table.c.assignee_name == username).order_by(table.c.id)
+        
+        # Get tasks where the user has explicit permissions
+        with connection.session as session:
+            # First, get own tasks
+            result_owned = session.execute(stmt)
+            owned_tasks = [DashboardTask.from_row(row) for row in result_owned.all()]
+            owned_task_ids = [task.task_id for task in owned_tasks if task]
+            
+            # Then get shared tasks with permissions
+            stmt_permissions = sa.text("""
+                SELECT d.* 
+                FROM dashboard d
+                JOIN task_permissions tp ON d.task_id = tp.task_id
+                WHERE tp.user_id = :user_id 
+                AND tp.permission_level IN ('read', 'edit', 'owner')
+                AND d.task_id NOT IN ({})
+            """.format(','.join('?' * len(owned_task_ids))))
+            
+            # Use empty tuple if no owned tasks to avoid SQL syntax error
+            if not owned_task_ids:
+                owned_task_ids = [-1]  # Dummy value that won't match any task_id
+            else:
+                # Ensure all task_ids are integers
+                owned_task_ids = [int(task_id) for task_id in owned_task_ids]
+            
+            try:
+                # Create a simpler query that uses a string format for the IN clause
+                # This is safe because we're controlling owned_task_ids ourselves
+                task_ids_str = ','.join(str(tid) for tid in owned_task_ids)
+                stmt_permissions = sa.text(f"""
+                    SELECT d.* 
+                    FROM dashboard d
+                    JOIN task_permissions tp ON d.task_id = tp.task_id
+                    WHERE tp.user_id = :user_id 
+                    AND tp.permission_level IN ('read', 'edit', 'owner')
+                    AND d.task_id NOT IN ({task_ids_str or -1})
+                """)
+                
+                result_shared = session.execute(
+                    stmt_permissions, 
+                    {"user_id": user_id}
+                )
+                shared_tasks = [DashboardTask.from_row(row) for row in result_shared.all()]
+                
+                # Log shared tasks for debugging
+                if shared_tasks:
+                    st.caption(f"Found {len(shared_tasks)} shared tasks for user {username} (ID: {user_id})")
+                
+                # Combine the two sets of tasks (owned + shared)
+                all_tasks = {}
+                for task in owned_tasks + shared_tasks:
+                    if task and task.title:
+                        all_tasks[task.task_id] = task
+                
+                return all_tasks
+            except Exception as e:
+                st.error(f"Error fetching shared tasks: {e}")
+                # If shared tasks query fails, return just owned tasks
+                all_tasks = {}
+                for task in owned_tasks:
+                    if task and task.title:
+                        all_tasks[task.task_id] = task
+                return all_tasks
+    except Exception as e:
+        st.error(f"Error loading tasks: {e}")
+        return {}
 
 def create_task_callback(connection: SQLConnection, table: Table):
     if not st.session_state.new_task_form__title:
@@ -453,6 +669,15 @@ def create_task_callback(connection: SQLConnection, table: Table):
         session.execute(stmt)
         session.commit()
 
+    # Set the creator as the owner
+    set_user_permission(connection, unique_task_id, st.session_state.user['id'], PermissionLevel.OWNER)
+    
+    # Check if we should automatically assign other users to this task
+    # This could be based on team/project settings or default collaborators
+    if "default_collaborators" in st.session_state:
+        for collab in st.session_state.default_collaborators:
+            set_user_permission(connection, unique_task_id, collab["user_id"], collab["permission_level"])
+
     # Создание узла в Neo4j
     create_task_node(unique_task_id, new_task_data["title"])
     
@@ -472,18 +697,26 @@ def create_task_callback(connection: SQLConnection, table: Table):
     st.session_state[SESSION_STATE_KEY_TASKS] = load_all_tasks(conn, dashboard_table)
 
 def open_update_callback(task_id: int):
-    # Check if the task belongs to the current user before allowing edit
-    task = load_all_tasks(conn, dashboard_table)[task_id]
-    if task and task.assignee_name != st.session_state.user['username']:
-        st.toast("You can only edit your own tasks.", icon="⚠️")
+    # Check if the user has permission to edit this task
+    user_id = st.session_state.user['id']
+    if not can_user_edit_task(conn, task_id, user_id):
+        st.toast("You don't have permission to edit this task.", icon="⚠️")
         return
+        
     st.session_state[f"currently_editing__{task_id}"] = True
 
 def cancel_update_callback(task_id: int):
     st.session_state[f"currently_editing__{task_id}"] = False
 
 def update_task_callback(connection: SQLConnection, table: Table, task_id: int):
+    # Check if the user has permission to edit this task
+    user_id = st.session_state.user['id']
+    if not can_user_edit_task(connection, task_id, user_id):
+        st.toast("You don't have permission to edit this task.", icon="⚠️")
+        return
+    
     status_value = st.session_state[f"edit_task_form_{task_id}__status"]
+    
     # Handle parent task ID
     parent_task_id = st.session_state[f"edit_task_form_{task_id}__parent_task_id"]
     if parent_task_id == "None":
@@ -502,6 +735,7 @@ def update_task_callback(connection: SQLConnection, table: Table, task_id: int):
                 
         except ValueError:
             parent_task_id = None
+    
     updated_values = {
         "title": st.session_state[f"edit_task_form_{task_id}__title"],
         "description": st.session_state[f"edit_task_form_{task_id}__description"],
@@ -516,12 +750,6 @@ def update_task_callback(connection: SQLConnection, table: Table, task_id: int):
         st.session_state[f"currently_editing__{task_id}"] = True
         return
         
-    # Check that this task belongs to the current user
-    task = load_all_tasks(connection, table)[task_id]
-    if task and task.assignee_name != st.session_state.user['username']:
-        st.toast("You can only edit your own tasks.", icon="⚠️")
-        st.session_state[f"currently_editing__{task_id}"] = False
-        return
     stmt = table.update().where(table.c.task_id == task_id).values(**updated_values)
     with connection.session as session:
         session.execute(stmt)
@@ -536,12 +764,12 @@ def update_task_callback(connection: SQLConnection, table: Table, task_id: int):
     st.session_state[f"currently_editing__{task_id}"] = False
 
 def delete_task_callback(connection: SQLConnection, table: Table, task_id: int):
-    # Check that this task belongs to the current user
-    task = load_all_tasks(connection, table)[task_id]
-    if task and task.assignee_name != st.session_state.user['username']:
-        st.toast("You can only delete your own tasks.", icon="⚠️")
+    # Check if the user has permission to delete this task
+    user_id = st.session_state.user['id']
+    if not can_user_delete_task(connection, task_id, user_id):
+        st.toast("You don't have permission to delete this task.", icon="⚠️")
         return
-        
+    
     # Check if this task has children
     with connection.session as session:
         child_count = len(get_child_tasks(task_id))
@@ -551,6 +779,12 @@ def delete_task_callback(connection: SQLConnection, table: Table, task_id: int):
             return
 
         delete_task_node(task_id)
+    
+    # Delete task permissions
+    with connection.session as session:
+        stmt = sa.text("DELETE FROM task_permissions WHERE task_id = :task_id")
+        session.execute(stmt, {"task_id": task_id})
+        session.commit()
     
     # Delete any associated documents
     documents_collection.delete_many({"task_id": task_id, "user_id": st.session_state.user['username']})
@@ -567,6 +801,11 @@ def delete_task_callback(connection: SQLConnection, table: Table, task_id: int):
 
 def task_card(connection: SQLConnection, table: Table, task_item: DashboardTask):
     task_id = task_item.task_id
+    user_id = st.session_state.user['id']
+    
+    # Check user permissions for this task
+    permission = get_user_permission(connection, task_id, user_id)
+    
     with st.container(border=True):
         display_title = task_item.title
         display_description = task_item.description or ":grey[*No description*]"
@@ -578,9 +817,23 @@ def task_card(connection: SQLConnection, table: Table, task_item: DashboardTask)
             if status_value.startswith('TaskStatus.'):
                 status_value = status_value.split('.', 1)[1]
         display_status = f":grey[Status: {status_value}]"
-        display_soft_deadline = f":grey[Soft deadline: {task_item.soft_deadline.strftime('%Y-%m-%d') if task_item.soft_deadline else '-'}]"
-        display_hard_deadline = f":grey[Hard deadline: {task_item.hard_deadline.strftime('%Y-%m-%d') if task_item.hard_deadline else '-'}]"
+        
+        # Handle formatting both datetime objects and string dates
+        def format_date(date_value):
+            if date_value:
+                if hasattr(date_value, 'strftime'):
+                    return date_value.strftime('%Y-%m-%d')
+                else:
+                    # Handle string dates by returning them directly
+                    return str(date_value)
+            return '-'
+            
+        display_soft_deadline = f":grey[Soft deadline: {format_date(task_item.soft_deadline)}]"
+        display_hard_deadline = f":grey[Hard deadline: {format_date(task_item.hard_deadline)}]"
         display_task_id = f":grey[Task ID: {task_id}]"
+        
+        # Display permission level for current user
+        display_permission = f":violet[Your access: {permission}]"
         
         # Display parent task info if exists
         parent = get_parent_task(task_id)
@@ -607,6 +860,9 @@ def task_card(connection: SQLConnection, table: Table, task_item: DashboardTask)
         task_col2.markdown(display_soft_deadline)
         task_col2.markdown(display_hard_deadline)
         
+        # Display permission info
+        st.markdown(display_permission)
+        
         # Display parent/child relationships
         if parent_task_info:
             st.markdown(parent_task_info)
@@ -623,23 +879,93 @@ def task_card(connection: SQLConnection, table: Table, task_item: DashboardTask)
                 mime="application/octet-stream",
                 use_container_width=True
             )
-        edit_col, delete_col = st.columns(2)
-        edit_col.button(
-            "Edit",
-            icon=":material/edit:",
-            key=f"display_task_{task_id}__edit",
-            on_click=open_update_callback,
-            args=(task_id,),
-            use_container_width=True,
-        )
-        if delete_col.button(
-            "Delete",
-            icon=":material/delete:",
-            key=f"display_task_{task_id}__delete",
-            use_container_width=True,
-        ):
-            delete_task_callback(connection, table, task_id)
-            st.rerun(scope="app")
+            
+        # Show action buttons based on permission level
+        if permission in [PermissionLevel.OWNER.value, PermissionLevel.EDIT.value]:
+            edit_col, delete_col = st.columns(2)
+            edit_col.button(
+                "Edit",
+                icon=":material/edit:",
+                key=f"display_task_{task_id}__edit",
+                on_click=open_update_callback,
+                args=(task_id,),
+                use_container_width=True,
+            )
+            
+            if permission == PermissionLevel.OWNER.value:
+                if delete_col.button(
+                    "Delete",
+                    icon=":material/delete:",
+                    key=f"display_task_{task_id}__delete",
+                    use_container_width=True,
+                ):
+                    delete_task_callback(connection, table, task_id)
+                    st.rerun(scope="app")
+        
+        # Add user permissions management (only for task owner)
+        if permission == PermissionLevel.OWNER.value:
+            with st.expander("Manage User Permissions"):
+                # Get all users and their current permissions for this task
+                try:
+                    all_users = get_all_users(connection)
+                    task_permissions = get_all_task_permissions(connection, task_id)
+                    
+                    # Show current permissions for debugging
+                    st.caption("Current permissions:")
+                    if task_permissions:
+                        for perm in task_permissions:
+                            st.caption(f"User: {perm['username']}, Permission: {perm['permission']}")
+                    else:
+                        st.caption("No users have been granted permissions yet")
+                    
+                    # Convert permissions to dict for easier lookup
+                    permission_dict = {p["user_id"]: p["permission"] for p in task_permissions}
+                    
+                    # Create a form for permission management
+                    with st.form(key=f"permission_form_{task_id}"):
+                        st.write("Assign permissions to users:")
+                        
+                        # Create a selection for each user (except the owner)
+                        user_permissions = {}
+                        for user in all_users:
+                            if user["id"] != task_item.assignee_id:  # Skip the owner
+                                current_permission = permission_dict.get(
+                                    user["id"], PermissionLevel.NONE.value
+                                )
+                                
+                                # Create a selectbox for this user
+                                col1, col2 = st.columns([2, 1])
+                                col1.write(f"{user['username']} ({user['email']})")
+                                permission_options = [p.value for p in PermissionLevel if p != PermissionLevel.OWNER]
+                                selected_permission = col2.selectbox(
+                                    "Permission",
+                                    options=permission_options,
+                                    index=permission_options.index(current_permission) if current_permission in permission_options else 0,
+                                    key=f"permission_{task_id}_{user['id']}",
+                                    label_visibility="collapsed"
+                                )
+                                user_permissions[user["id"]] = selected_permission
+                        
+                        # Submit button to save permissions
+                        if st.form_submit_button("Save Permissions"):
+                            try:
+                                # Log before saving
+                                st.caption("Saving permissions:")
+                                for user_id, perm_level in user_permissions.items():
+                                    st.caption(f"Setting user {user_id} to {perm_level}")
+                                    set_user_permission(connection, task_id, user_id, perm_level)
+                                st.toast("Permissions updated successfully!", icon="✅")
+                                
+                                # Force a session state reload after updating permissions
+                                if SESSION_STATE_KEY_TASKS in st.session_state:
+                                    del st.session_state[SESSION_STATE_KEY_TASKS]
+                                    
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error saving permissions: {e}")
+                except Exception as e:
+                    st.error(f"Error loading user permissions: {e}")
+                    st.info("Please make sure the task_permissions table exists and is properly configured.")
 
 def task_edit_widget(connection: SQLConnection, table: Table, task_item: DashboardTask):
     task_id = task_item.task_id
@@ -655,20 +981,44 @@ def task_edit_widget(connection: SQLConnection, table: Table, task_item: Dashboa
                 current_status = current_status.split('.', 1)[1]
         st.selectbox("Status", status_values, index=status_values.index(current_status), key=f"edit_task_form_{task_id}__status")
         
-        parent_task_options = {"None": "No parent task"}
-        parent_task_options.update(available_tasks)
+        # Get current parent task
+        parent = get_parent_task(task_id)
+        parent_id = parent["id"] if parent else None
         
-        # Select the current parent task if any
-        current_parent = str(task_item.parent_task_id) if task_item.parent_task_id else "None"
-        
-        # Create a parent task dropdown
-        st.selectbox(
-            "Parent Task", 
-            options=list(parent_task_options.keys()),
-            format_func=lambda x: parent_task_options[x],
-            key=f"edit_task_form_{task_id}__parent_task_id",
-            index=list(parent_task_options.keys()).index(current_parent) if current_parent in parent_task_options else 0
-        )
+        # Get all available tasks for parent selection (excluding this task)
+        try:
+            all_tasks = get_available_tasks(connection, table, st.session_state.user['username'])
+            # Remove this task from options to prevent self-reference
+            if task_id in all_tasks:
+                del all_tasks[task_id]
+            
+            # Create a dropdown with available parent options
+            parent_options = {"None": "No parent task"}
+            parent_options.update(all_tasks)
+            
+            # Set the current parent as selected
+            current_parent = str(parent_id) if parent_id else "None"
+            parent_index = 0  # Default to "None"
+            
+            # Find index of current parent in options
+            if current_parent in parent_options:
+                parent_index = list(parent_options.keys()).index(current_parent)
+            
+            st.selectbox(
+                "Parent Task", 
+                options=list(parent_options.keys()),
+                format_func=lambda x: parent_options[x],
+                key=f"edit_task_form_{task_id}__parent_task_id",
+                index=parent_index
+            )
+        except Exception as e:
+            st.error(f"Error loading parent task options: {e}")
+            # Fallback to a text input if task list fails to load
+            st.text_input(
+                "Parent Task ID (leave empty for no parent)",
+                value=str(parent_id) if parent_id else "",
+                key=f"edit_task_form_{task_id}__parent_task_id"
+            )
         
         st.date_input("Soft deadline", value=task_item.soft_deadline, key=f"edit_task_form_{task_id}__soft_deadline")
         st.date_input("Hard deadline", value=task_item.hard_deadline, key=f"edit_task_form_{task_id}__hard_deadline")
@@ -695,9 +1045,11 @@ def task_edit_widget(connection: SQLConnection, table: Table, task_item: Dashboa
 def task_component(_connection: SQLConnection, table: Table, task_id: int):
     task_item = st.session_state[SESSION_STATE_KEY_TASKS][task_id]
     currently_editing = st.session_state.get(f"currently_editing__{task_id}")
-    # Verify the task belongs to the current user
-    if task_item.assignee_name != st.session_state.user['username']:
-        st.warning(f"Task {task_id} does not belong to you.")
+    
+    # Check if user has permission to view this task, not just if they're the assignee
+    user_id = st.session_state.user['id']
+    if not can_user_view_task(_connection, task_id, user_id):
+        st.warning(f"You don't have permission to view task {task_id}.")
         return
         
     if not currently_editing:
@@ -744,16 +1096,18 @@ with st.sidebar:
         # User management section
         with st.expander("User Management"):
             # Show a list of all users
-            with _connection.session as session:
-                stmt = sa.text("SELECT id, username, email, full_name, created_at FROM users")
-                result = session.execute(stmt)
-                users = result.fetchall()
+            try:
+                all_users = get_all_users(conn)
                 
-                if users:
-                    user_df = pd.DataFrame(users)
+                if all_users:
+                    # Create a DataFrame from the list of dictionaries
+                    user_df = pd.DataFrame(all_users)
                     st.dataframe(user_df, use_container_width=True)
                 else:
                     st.info("No users found in the database.")
+            except Exception as e:
+                st.error(f"Error fetching users: {e}")
+                st.info("Please make sure the users table exists and is properly configured.")
     
     st.divider()
     st.subheader("Session State Debug")

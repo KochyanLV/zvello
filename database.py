@@ -183,6 +183,19 @@ class TaskHistory(Base):
     task = relationship('Task', back_populates='history')
     user = relationship('User', back_populates='history_records')
 
+class TaskPermission(Base):
+    __tablename__ = 'task_permissions'
+
+    id = Column(Integer, primary_key=True)
+    task_id = Column(Integer, ForeignKey('tasks.id'), nullable=False)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    permission_level = Column(String(20), nullable=False)  # 'owner', 'edit', 'read', 'none'
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    task = relationship('Task', back_populates='permissions')
+    user = relationship('User', back_populates='permissions')
+
 # Database connection and table creation
 def init_db(database_url='sqlite:///tasks.db'):
     engine = create_engine(database_url)
